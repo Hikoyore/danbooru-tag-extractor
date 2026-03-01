@@ -1,113 +1,128 @@
 import requests
 import re
+from urllib.parse import urlparse
 
 def clean_tag(tag):
-    """Заменяет подчеркивания на пробелы"""
     return tag.replace('_', ' ')
 
-def extract_post_id_from_url(url):
-    """Извлекает ID поста из различных форматов URL Danbooru"""
-    
-    # Паттерны для разных форматов URL
-    patterns = [
-        r'danbooru\.donmai\.us/posts/(\d+)',  # /posts/123456
-        r'danbooru\.donmai\.us/data/[^?]+\?(\d+)',  # /data/xxx.jpg?123456
-        r'danbooru\.donmai\.us/original/[^/]+/[^/]+/[^/]+\.([a-f0-9]{32})',  # MD5 хеш
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
+def extract_identifier(url):
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    path = parsed.path
+    query = parsed.query
+
+    if 'danbooru.donmai.us' in domain or 'aibooru.online' in domain:
+        match = re.search(r'/posts/(\d+)', path)
         if match:
-            if pattern == patterns[2]:  # MD5 паттерн
-                return f"md5:{match.group(1)}"
-            return match.group(1)
-    
-    return None
+            return domain, match.group(1)
+        match = re.search(r'/data/[^?]+\?(\d+)', url)
+        if match:
+            return domain, match.group(1)
+        match = re.search(r'/([a-f0-9]{32})\.[a-z]+', url, re.IGNORECASE)
+        if match:
+            md5 = match.group(1)
+            return domain, f"md5:{md5}"
+
+    elif 'konachan.com' in domain or 'konachan.net' in domain:
+        match = re.search(r'/post/show/(\d+)', path)
+        if match:
+            return domain, match.group(1)
+        match = re.search(r'/posts/(\d+)', path)
+        if match:
+            return domain, match.group(1)
+        match = re.search(r'/([a-f0-9]{32})\.[a-z]+', url, re.IGNORECASE)
+        if match:
+            md5 = match.group(1)
+            return domain, f"md5:{md5}"
+        match = re.search(r'[?&]post_id=(\d+)', query)
+        if match:
+            return domain, match.group(1)
+
+    return None, None
 
 def get_clean_tags_from_url(url):
-    """
-    Получает теги по URL изображения Danbooru
-    """
     print("🔄 Получаю теги...")
-    
-    # Извлекаем ID или MD5 из URL
-    post_id_or_md5 = extract_post_id_from_url(url)
-    
-    if not post_id_or_md5:
-        print("❌ Не удалось определить ID поста из ссылки")
+
+    domain, identifier = extract_identifier(url)
+    if not domain or not identifier:
+        print("❌ Не удалось определить идентификатор поста из ссылки")
         return None
-    
-    # Формируем запрос к API
-    if post_id_or_md5.startswith('md5:'):
-        # Поиск по MD5
-        md5 = post_id_or_md5[4:]
-        api_url = f"https://danbooru.donmai.us/posts.json?tags=md5:{md5}"
+
+    if 'danbooru.donmai.us' in domain or 'aibooru.online' in domain:
+        api_base = f"https://{domain}"
+        endpoint = "/posts.json"
+        tag_field = "tag_string"
+    elif 'konachan.com' in domain or 'konachan.net' in domain:
+        api_base = f"https://{domain}"
+        endpoint = "/post.json"
+        tag_field = "tags"
     else:
-        # Прямой запрос по ID
-        api_url = f"https://danbooru.donmai.us/posts/{post_id_or_md5}.json"
-    
+        print(f"❌ Домен {domain} не поддерживается")
+        return None
+
+    if identifier.startswith("md5:"):
+        params = {"tags": identifier}
+    else:
+        params = {"tags": f"id:{identifier}"}
+
+    api_url = api_base + endpoint
+
     try:
-        response = requests.get(api_url)
+        response = requests.get(api_url, params=params)
         response.raise_for_status()
-        
         data = response.json()
-        
-        # Если искали по MD5, берем первый результат
-        if isinstance(data, list):
-            if not data:
-                print("❌ Пост не найден")
-                return None
-            data = data[0]
-            post_id = data['id']
-        else:
-            post_id = post_id_or_md5
-        
-        # Получаем сырые теги
-        raw_tags = data['tag_string'].split()
-        
-        # Очищаем теги (заменяем _ на пробелы)
+
+        if not isinstance(data, list) or len(data) == 0:
+            print("❌ Пост не найден")
+            return None
+
+        post = data[0]
+        post_id = post.get('id', identifier)
+        raw_tags = post.get(tag_field, "").split()
+        if not raw_tags:
+            print("⚠️ У поста нет тегов")
+            return None
+
         clean_tags = [clean_tag(tag) for tag in raw_tags]
-        
-        # Сортируем
         clean_tags.sort()
-        
-        # Сохраняем в файл
-        filename = f"tags_{post_id}_clean.txt"
+
+        domain_slug = domain.replace('.', '_')
+        filename = f"tags_{domain_slug}_{post_id}_clean.txt"
         with open(filename, 'w', encoding='utf-8') as f:
-            # Все теги в одну строку через запятую
             f.write(", ".join(clean_tags))
             f.write(f"\n\nВсего тегов: {len(clean_tags)}")
-        
-        # МИНИМАЛЬНЫЙ ВЫВОД
+
         print(f"✅ Сохранено {len(clean_tags)} тегов в {filename}")
-        
         return clean_tags
-        
+
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка при запросе: {e}")
         return None
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         print(f"❌ Ошибка при обработке данных: {e}")
         return None
 
 def main():
-    print("="*50)
-    print("Danbooru Tag Extractor")
-    print("="*50)
-    print("Вставьте ссылку на изображение Danbooru")
-    print("(Пример: https://danbooru.donmai.us/posts/123456)")
+    print("=" * 50)
+    print("Tag Extractor для Danbooru, Aibooru, Konachan")
+    print("=" * 50)
+    print("Вставьте ссылку на страницу поста или изображение")
+    print("Поддерживаемые сайты: danbooru.donmai.us, aibooru.online, konachan.com, konachan.net")
+    print("Примеры:")
+    print("  https://danbooru.donmai.us/posts/123456")
+    print("  https://konachan.com/post/show/123456")
     print()
-    
+    print("Для выхода введите exit, quit или пустую строку")
+    print()
+
     while True:
         url = input("🔗 Ссылка: ").strip()
-        
         if url.lower() in ['exit', 'quit', 'q', '']:
             print("Программа завершена.")
             break
-        
         if url:
             get_clean_tags_from_url(url)
-            print()  # Пустая строка для разделения
+            print()
 
 if __name__ == "__main__":
     main()
